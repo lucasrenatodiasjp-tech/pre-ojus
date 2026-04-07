@@ -37,50 +37,29 @@ export const extractStockData = async (ticker: string): Promise<Partial<StockDat
   }
 
   const apiKey = process.env.GEMINI_API_KEY || (import.meta as any).env?.VITE_GEMINI_API_KEY || "AIzaSyCUssz0tHGA2LsUXIOLvR1ql-yifNl3ILg";
-  if (!apiKey || apiKey === "AIzaSyCUssz0tHGA2LsUXIOLvR1ql-yifNl3ILg") {
-    console.info("Using provided fallback Gemini API key.");
-  }
-
+  
   try {
     const ai = new GoogleGenAI({ apiKey });
+    console.log(`Searching data for ${tickerUpper}...`);
+    
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-latest", // Using latest stable flash for better tool reliability
-      contents: `Extract current financial indicators for the Brazilian stock ${tickerUpper}. 
-      Use Google Search to find data from reliable sources like StatusInvest, Fundamentus, or Analitica AUVP.
+      model: "gemini-3-flash-preview",
+      contents: `Search for the Brazilian stock ${tickerUpper} and return its current financial indicators.
+      Sources: StatusInvest, Fundamentus, InfoMoney.
       
-      Required fields (return as numbers, percentages as decimals):
-      - currentPrice: Current stock price in BRL
-      - lpa: Earnings per share (Lucro por Ação)
-      - vpa: Book value per share (Valor Patrimonial por Ação)
-      - dividendYield: DY % (e.g. 0.085 for 8.5%)
-      - revenueGrowth: 5-year revenue growth %
-      - profitGrowth: 5-year profit growth %
-      - payout: Dividend payout ratio %
-      - roe: Return on Equity %
-      - roic: ROIC %
-      - roa: ROA %
-      - assetTurnover: Asset turnover ratio
-      - pl: P/E ratio (Preço/Lucro)
-      - pvp: P/B ratio (Preço/Valor Patrimonial)
-      - evEbitda: EV/EBITDA
-      - evEbit: EV/EBIT
-      - earningYield: Earning Yield %
-      - netMargin: Net margin %
-      - ebitMargin: EBIT margin %
-      - grossMargin: Gross margin %
-      - dlEbitda: Net Debt / EBITDA
-      - currentRatio: Liquidez Corrente
-      - quickRatio: Liquidez Seca
-      - equityToAssets: Equity / Total Assets
-      - fcfAtual: Current Free Cash Flow (total value in BRL)
-      - dividaLiquida: Net Debt (total value in BRL)
-      - acoesCirculacao: Total shares outstanding
-      - sector: One of "finance", "cyclical", "growth", "stable"
-      - plSetor: Average P/E for the sector
+      Required JSON fields:
+      - currentPrice (number)
+      - lpa (number)
+      - vpa (number)
+      - dividendYield (number, e.g. 0.08)
+      - roe (number, e.g. 0.15)
+      - pl (number)
+      - pvp (number)
+      - sector (string: "finance", "cyclical", "growth", "stable")
       
-      Return ONLY a valid JSON object.`,
+      Optional (use 0 if not found): revenueGrowth, profitGrowth, payout, roic, fcfAtual, dividaLiquida, acoesCirculacao.`,
       config: {
-        systemInstruction: "You are a specialized financial data extractor for the Brazilian stock market. Use Google Search to get the most accurate and recent data. If one source is blocked or unavailable, try others. Always return percentages as decimals (e.g., 15% -> 0.15). Return ONLY JSON.",
+        systemInstruction: "You are a financial data API. Return ONLY valid JSON. Use Google Search to find the latest data for the requested ticker. If you cannot find a specific value, provide a reasonable estimate based on the last 12 months. Percentages must be decimals.",
         tools: [
           { googleSearch: {} }
         ],
@@ -92,37 +71,32 @@ export const extractStockData = async (ticker: string): Promise<Partial<StockDat
             lpa: { type: Type.NUMBER },
             vpa: { type: Type.NUMBER },
             dividendYield: { type: Type.NUMBER },
+            roe: { type: Type.NUMBER },
+            pl: { type: Type.NUMBER },
+            pvp: { type: Type.NUMBER },
+            sector: { type: Type.STRING, enum: ["finance", "cyclical", "growth", "stable"] },
             revenueGrowth: { type: Type.NUMBER },
             profitGrowth: { type: Type.NUMBER },
             payout: { type: Type.NUMBER },
-            roe: { type: Type.NUMBER },
             roic: { type: Type.NUMBER },
-            roa: { type: Type.NUMBER },
-            assetTurnover: { type: Type.NUMBER },
-            pl: { type: Type.NUMBER },
-            pvp: { type: Type.NUMBER },
-            evEbitda: { type: Type.NUMBER },
-            evEbit: { type: Type.NUMBER },
-            earningYield: { type: Type.NUMBER },
-            netMargin: { type: Type.NUMBER },
-            ebitMargin: { type: Type.NUMBER },
-            grossMargin: { type: Type.NUMBER },
-            dlEbitda: { type: Type.NUMBER },
-            currentRatio: { type: Type.NUMBER },
-            quickRatio: { type: Type.NUMBER },
-            equityToAssets: { type: Type.NUMBER },
             fcfAtual: { type: Type.NUMBER },
             dividaLiquida: { type: Type.NUMBER },
             acoesCirculacao: { type: Type.NUMBER },
-            sector: { type: Type.STRING, enum: ["finance", "cyclical", "growth", "stable"] },
-            plSetor: { type: Type.NUMBER },
           },
-          required: ["currentPrice", "lpa", "vpa", "dividendYield", "roe", "pl", "pvp", "fcfAtual", "dividaLiquida", "acoesCirculacao", "sector"],
+          required: ["currentPrice", "lpa", "vpa", "dividendYield", "roe", "pl", "pvp", "sector"],
         },
       },
     });
 
-    const data = JSON.parse(response.text || "{}");
+    console.log("Raw Gemini Response:", response);
+    
+    if (!response.text) {
+      console.error("Gemini returned no text. Candidates:", response.candidates);
+      throw new Error("Empty response from Gemini");
+    }
+
+    const data = JSON.parse(response.text);
+    console.log("Data received:", data);
     
     // Map to StockData structure
     const result: Partial<StockData> = {
@@ -170,8 +144,8 @@ export const extractStockData = async (ticker: string): Promise<Partial<StockDat
     // Save to cache
     setCache(tickerUpper, result);
     return result;
-  } catch (e) {
+  } catch (e: any) {
     console.error("Error extracting stock data", e);
-    return {};
+    return { error: e.message || "Erro desconhecido na extração" };
   }
 };

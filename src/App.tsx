@@ -434,11 +434,15 @@ export default function App() {
         }));
         addToast(`Dados de ${ticker.toUpperCase()} atualizados!`, 'success');
       } else {
-        setError("Não foi possível encontrar dados para este ticker. Verifique se o ticker está correto.");
+        const errorMsg = (extracted as any).error || "Não foi possível encontrar dados para este ticker. Verifique se o ticker está correto.";
+        setError(errorMsg);
+        addToast(errorMsg, 'error');
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      setError("Erro ao conectar com as fontes de dados. Tente novamente.");
+      const msg = err.message || "Erro ao conectar com as fontes de dados.";
+      setError(msg);
+      addToast(msg, 'error');
     } finally {
       setLoading(false);
       setSearchingSource(null);
