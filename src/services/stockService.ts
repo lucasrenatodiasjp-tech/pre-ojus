@@ -8,14 +8,13 @@ const BRAPI_BASE_URL = 'https://brapi.dev/api';
 const FMP_BASE_URL = 'https://financialmodelingprep.com/api/v3';
 
 export const getStockData = async (ticker: string): Promise<Partial<StockData>> => {
-  const tickerUpper = ticker.toUpperCase();
+  const tickerTrimmed = ticker.trim().toUpperCase();
   
   // 1. Try to get real-time data from Financial Modeling Prep (if configured)
   if (FMP_API_KEY) {
     try {
-      console.log(`Fetching real-time data from FMP for ${tickerUpper}...`);
-      // FMP usually requires .SA for Brazilian stocks
-      const fmpTicker = tickerUpper.endsWith('.SA') ? tickerUpper : `${tickerUpper}.SA`;
+      console.log(`Fetching real-time data from FMP for ${tickerTrimmed}...`);
+      const fmpTicker = tickerTrimmed.endsWith('.SA') ? tickerTrimmed : `${tickerTrimmed}.SA`;
       const response = await axios.get(`${FMP_BASE_URL}/quote/${fmpTicker}`, {
         params: { apikey: FMP_API_KEY }
       });
@@ -23,47 +22,45 @@ export const getStockData = async (ticker: string): Promise<Partial<StockData>> 
       const data = response.data[0];
       if (data) {
         console.log("FMP data received:", data);
-        const fmpResult = {
-          ticker: tickerUpper,
+        const fmpResult: Partial<StockData> = {
+          ticker: tickerTrimmed,
           currentPrice: data.price,
           lpa: data.eps || 0,
         };
 
         try {
-          const geminiData = await extractWithGemini(tickerUpper);
-          if ((geminiData as any).error) return fmpResult;
-          return { ...geminiData, ...fmpResult };
-        } catch {
-          return fmpResult;
+          const geminiData = await extractWithGemini(tickerTrimmed);
+          if (!(geminiData as any).error) {
+            return { ...geminiData, ...fmpResult };
+          }
+        } catch (e) {
+          console.warn("Gemini complement failed for FMP, returning FMP only");
         }
+        return fmpResult;
       }
     } catch (error) {
-      console.warn("FMP API failed, trying Brapi or Gemini:", error);
+      console.warn("FMP API failed:", error);
     }
   }
 
   // 2. Try to get real-time data from Brapi (if configured)
   if (BRAPI_TOKEN) {
     try {
-      console.log(`Fetching real-time data from Brapi for ${tickerUpper}...`);
-      const response = await axios.get(`${BRAPI_BASE_URL}/quote/${tickerUpper}`, {
+      console.log(`Fetching real-time data from Brapi for ${tickerTrimmed}...`);
+      const response = await axios.get(`${BRAPI_BASE_URL}/quote/${tickerTrimmed}`, {
         params: {
           token: BRAPI_TOKEN,
           fundamental: true
         }
       });
 
-      if (!response.data || !response.data.results || response.data.results.length === 0) {
-        console.warn(`Brapi returned no results for ${tickerUpper}`);
-      } else {
+      if (response.data?.results?.[0]) {
         const data = response.data.results[0];
         console.log("Brapi data received:", data);
         
-        // Map Brapi data to our structure
         const apiResult: Partial<StockData> = {
-          ticker: tickerUpper,
+          ticker: tickerTrimmed,
           currentPrice: data.regularMarketPrice,
-          // Brapi fundamental data mapping
           lpa: data.earningsPerShare || 0,
           vpa: data.bookValue || 0,
           dividendYield: (data.dividendYield || 0) / 100,
@@ -77,55 +74,44 @@ export const getStockData = async (ticker: string): Promise<Partial<StockData>> 
             dy: (data.dividendYield || 0) / 100,
             lpa: data.earningsPerShare || 0,
             vpa: data.bookValue || 0,
-            // Fill others with 0 or defaults if not available
-            roa: 0,
-            assetTurnover: 0,
-            evEbitda: 0,
-            evEbit: 0,
-            earningYield: 0,
-            revenueGrowth: 0,
-            profitGrowth: 0,
-            ebitGrowth: 0,
-            netMargin: 0,
-            ebitMargin: 0,
-            grossMargin: 0,
-            payout: 0,
-            dlEbitda: 0,
-            currentRatio: 0,
-            quickRatio: 0,
-            equityToAssets: 0,
+            roa: 0, assetTurnover: 0, evEbitda: 0, evEbit: 0, earningYield: 0,
+            revenueGrowth: 0, profitGrowth: 0, ebitGrowth: 0, netMargin: 0,
+            ebitMargin: 0, grossMargin: 0, payout: 0, dlEbitda: 0,
+            currentRatio: 0, quickRatio: 0, equityToAssets: 0,
           }
         };
 
-        // If we have the core data, we can return it. 
-        if (apiResult.currentPrice && apiResult.lpa && apiResult.vpa) {
+        // If we have at least the price, we try to complement but don't fail if Gemini fails
+        if (apiResult.currentPrice) {
           try {
-            console.log("Brapi success, attempting to complement with Gemini...");
-            const geminiData = await extractWithGemini(tickerUpper);
+            console.log("Brapi price found, attempting Gemini complement...");
+            const geminiData = await extractWithGemini(tickerTrimmed);
             
-            if ((geminiData as any).error) {
-              console.warn("Gemini failed during merge, using Brapi data only.");
-              return apiResult;
+            if (!(geminiData as any).error) {
+              return {
+                ...geminiData,
+                ...apiResult,
+                indicators: {
+                  ...geminiData.indicators,
+                  ...apiResult.indicators
+                }
+              };
             }
-
-            return {
-              ...geminiData,
-              ...apiResult,
-              indicators: {
-                ...geminiData.indicators,
-                ...apiResult.indicators
-              }
-            };
-          } catch (mergeError) {
-            return apiResult;
+            console.warn("Gemini complement failed (quota?), returning Brapi data only.");
+          } catch (e) {
+            console.warn("Gemini complement error, returning Brapi data only.");
           }
+          return apiResult;
         }
+      } else {
+        console.warn(`Brapi returned no results for ${tickerTrimmed}`);
       }
-    } catch (error) {
-      console.warn("Brapi API failed or returned no data, falling back to Gemini:", error);
+    } catch (error: any) {
+      console.warn("Brapi API error:", error.response?.data || error.message);
     }
   }
 
-  // 2. Fallback to Gemini if API fails or is not configured
-  return extractWithGemini(tickerUpper);
+  // 3. Last resort: Gemini only
+  console.log("Falling back to Gemini as last resort...");
+  return extractWithGemini(tickerTrimmed);
 };
