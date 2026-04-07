@@ -2,7 +2,7 @@ import axios from 'axios';
 import { StockData } from '../types.ts';
 import { extractStockData as extractWithGemini } from './geminiService.ts';
 
-const BRAPI_TOKEN = import.meta.env.VITE_BRAPI_TOKEN || "";
+const BRAPI_TOKEN = import.meta.env.VITE_BRAPI_TOKEN || "8UDXWPWZfD84PALhx4CAuH";
 const FMP_API_KEY = import.meta.env.VITE_FMP_API_KEY || "";
 const BRAPI_BASE_URL = 'https://brapi.dev/api';
 const FMP_BASE_URL = 'https://financialmodelingprep.com/api/v3';
