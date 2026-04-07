@@ -36,7 +36,7 @@ export const extractStockData = async (ticker: string): Promise<Partial<StockDat
     return cache[tickerUpper].data;
   }
 
-  const apiKey = process.env.GEMINI_API_KEY || (import.meta as any).env?.VITE_GEMINI_API_KEY || "AIzaSyCUssz0tHGA2LsUXIOLvR1ql-yifNl3ILg";
+  const apiKey = process.env.GEMINI_API_KEY || (import.meta as any).env?.VITE_GEMINI_API_KEY || "AIzaSyA4bmVY7KVy-gFfn7-g7Cademy8GkNewiA";
   
   try {
     const ai = new GoogleGenAI({ apiKey });
