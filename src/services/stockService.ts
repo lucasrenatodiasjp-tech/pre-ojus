@@ -23,13 +23,19 @@ export const getStockData = async (ticker: string): Promise<Partial<StockData>> 
       const data = response.data[0];
       if (data) {
         console.log("FMP data received:", data);
-        return {
+        const fmpResult = {
           ticker: tickerUpper,
           currentPrice: data.price,
           lpa: data.eps || 0,
-          // FMP provides basic quote data, we still need Gemini for deep fundamentals
-          ...(await extractWithGemini(tickerUpper))
         };
+
+        try {
+          const geminiData = await extractWithGemini(tickerUpper);
+          if ((geminiData as any).error) return fmpResult;
+          return { ...geminiData, ...fmpResult };
+        } catch {
+          return fmpResult;
+        }
       }
     } catch (error) {
       console.warn("FMP API failed, trying Brapi or Gemini:", error);
@@ -47,9 +53,10 @@ export const getStockData = async (ticker: string): Promise<Partial<StockData>> 
         }
       });
 
-      const data = response.data.results[0];
-      
-      if (data) {
+      if (!response.data || !response.data.results || response.data.results.length === 0) {
+        console.warn(`Brapi returned no results for ${tickerUpper}`);
+      } else {
+        const data = response.data.results[0];
         console.log("Brapi data received:", data);
         
         // Map Brapi data to our structure
@@ -91,18 +98,27 @@ export const getStockData = async (ticker: string): Promise<Partial<StockData>> 
         };
 
         // If we have the core data, we can return it. 
-        // But for a complete valuation, we might still want Gemini to fill the gaps (FCF, Sector, etc.)
-        if (apiResult.lpa && apiResult.vpa) {
-          // Smart merge: Use Gemini to fill missing fundamental fields if needed
-          const geminiData = await extractWithGemini(tickerUpper);
-          return {
-            ...geminiData,
-            ...apiResult, // API data takes precedence for price and basic metrics
-            indicators: {
-              ...geminiData.indicators,
-              ...apiResult.indicators
+        if (apiResult.currentPrice && apiResult.lpa && apiResult.vpa) {
+          try {
+            console.log("Brapi success, attempting to complement with Gemini...");
+            const geminiData = await extractWithGemini(tickerUpper);
+            
+            if ((geminiData as any).error) {
+              console.warn("Gemini failed during merge, using Brapi data only.");
+              return apiResult;
             }
-          };
+
+            return {
+              ...geminiData,
+              ...apiResult,
+              indicators: {
+                ...geminiData.indicators,
+                ...apiResult.indicators
+              }
+            };
+          } catch (mergeError) {
+            return apiResult;
+          }
         }
       }
     } catch (error) {
