@@ -27,6 +27,9 @@ import { motion, AnimatePresence } from 'motion/react';
 import { StockData, ValuationResults, calculateValuation } from './types.ts';
 import { extractStockData } from './services/geminiService.ts';
 import { formatCompactNumber, parseCompactNumber, getScaleAndValue } from './utils.ts';
+import { supabase } from './lib/supabase.ts';
+import { User } from '@supabase/supabase-js';
+import { LogIn, LogOut, User as UserIcon, Cloud, CloudOff } from 'lucide-react';
 
 const DEFAULT_STOCK: StockData = {
   ticker: 'CMIG4',
@@ -193,6 +196,12 @@ export default function App() {
   const [savedTickers, setSavedTickers] = useState<string[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [user, setUser] = useState<User | null>(null);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [isSignUp, setIsSignUp] = useState(false);
+  const [authLoading, setAuthLoading] = useState(false);
 
   const addToast = (message: string, type: 'success' | 'error' | 'info' = 'success', onUndo?: () => void) => {
     const id = Math.random().toString(36).substring(2, 9);
@@ -206,63 +215,202 @@ export default function App() {
     setToasts(prev => prev.filter(t => t.id !== id));
   };
 
-  // Load saved tickers on mount
+  // Auth state listener
   useEffect(() => {
-    const saved = localStorage.getItem('saved_tickers');
-    if (saved) {
-      setSavedTickers(JSON.parse(saved));
-    }
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
-  const saveAnalysis = () => {
+  // Load saved tickers from Supabase or localStorage
+  useEffect(() => {
+    const fetchTickers = async () => {
+      try {
+        if (user) {
+          const { data, error } = await supabase
+            .from('analyses')
+            .select('ticker')
+            .eq('user_id', user.id);
+          
+          if (data && !error) {
+            const tickers = Array.from(new Set(data.map(item => item.ticker)));
+            setSavedTickers(tickers || []);
+          }
+        } else {
+          const saved = localStorage.getItem('saved_tickers');
+          if (saved) {
+            try {
+              const parsed = JSON.parse(saved);
+              setSavedTickers(Array.isArray(parsed) ? parsed : []);
+            } catch (e) {
+              setSavedTickers([]);
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Error fetching tickers:', err);
+        setSavedTickers([]);
+      }
+    };
+
+    fetchTickers();
+  }, [user]);
+
+  const saveAnalysis = async () => {
     const tickerName = stock.ticker.toUpperCase();
     if (!tickerName) return;
 
-    const previousData = localStorage.getItem(`analysis_${tickerName}`);
-    localStorage.setItem(`analysis_${tickerName}`, JSON.stringify(stock));
-    
-    if (!savedTickers.includes(tickerName)) {
-      const newTickers = [...savedTickers, tickerName];
+    if (user) {
+      const { error } = await supabase
+        .from('analyses')
+        .upsert({ 
+          user_id: user.id, 
+          ticker: tickerName, 
+          data: stock,
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'user_id,ticker' });
+
+      if (error) {
+        addToast('Erro ao salvar no servidor.', 'error');
+        console.error(error);
+      } else {
+        if (!savedTickers.includes(tickerName)) {
+          setSavedTickers(prev => [...prev, tickerName]);
+        }
+        addToast(`Análise de ${tickerName} salva na nuvem!`, 'success');
+      }
+    } else {
+      const previousData = localStorage.getItem(`analysis_${tickerName}`);
+      localStorage.setItem(`analysis_${tickerName}`, JSON.stringify(stock));
+      
+      if (!savedTickers.includes(tickerName)) {
+        const newTickers = [...savedTickers, tickerName];
+        setSavedTickers(newTickers);
+        localStorage.setItem('saved_tickers', JSON.stringify(newTickers));
+      }
+      
+      addToast(`Análise de ${tickerName} salva localmente!`, 'success', previousData ? () => {
+        localStorage.setItem(`analysis_${tickerName}`, previousData);
+        addToast(`Alteração em ${tickerName} desfeita.`, 'info');
+      } : undefined);
+    }
+  };
+
+  const loadAnalysis = async (tickerToLoad: string) => {
+    if (user) {
+      const { data, error } = await supabase
+        .from('analyses')
+        .select('data')
+        .eq('user_id', user.id)
+        .eq('ticker', tickerToLoad)
+        .single();
+      
+      if (data && !error) {
+        setStock(data.data);
+        setTicker(tickerToLoad);
+        setShowHistory(false);
+        goToStep(1);
+        addToast(`Análise de ${tickerToLoad} carregada da nuvem.`, 'info');
+      } else {
+        addToast('Erro ao carregar do servidor.', 'error');
+      }
+    } else {
+      const saved = localStorage.getItem(`analysis_${tickerToLoad}`);
+      if (saved) {
+        const data = JSON.parse(saved);
+        setStock(data);
+        setTicker(tickerToLoad);
+        setShowHistory(false);
+        goToStep(1);
+        addToast(`Análise de ${tickerToLoad} carregada localmente.`, 'info');
+      }
+    }
+  };
+
+  const deleteAnalysis = async (tickerToDelete: string) => {
+    if (user) {
+      const { error } = await supabase
+        .from('analyses')
+        .delete()
+        .eq('user_id', user.id)
+        .eq('ticker', tickerToDelete);
+      
+      if (!error) {
+        setSavedTickers(prev => prev.filter(t => t !== tickerToDelete));
+        addToast(`Análise de ${tickerToDelete} removida da nuvem.`, 'success');
+      } else {
+        addToast('Erro ao remover do servidor.', 'error');
+      }
+    } else {
+      const deletedData = localStorage.getItem(`analysis_${tickerToDelete}`);
+      localStorage.removeItem(`analysis_${tickerToDelete}`);
+      const newTickers = savedTickers.filter(t => t !== tickerToDelete);
       setSavedTickers(newTickers);
       localStorage.setItem('saved_tickers', JSON.stringify(newTickers));
-    }
-    
-    addToast(`Análise de ${tickerName} salva com sucesso!`, 'success', previousData ? () => {
-      localStorage.setItem(`analysis_${tickerName}`, previousData);
-      addToast(`Alteração em ${tickerName} desfeita.`, 'info');
-    } : undefined);
-  };
-
-  const loadAnalysis = (tickerToLoad: string) => {
-    const saved = localStorage.getItem(`analysis_${tickerToLoad}`);
-    if (saved) {
-      const data = JSON.parse(saved);
-      setStock(data);
-      setTicker(tickerToLoad);
-      setShowHistory(false);
-      goToStep(1);
-      addToast(`Análise de ${tickerToLoad} carregada.`, 'info');
+      
+      addToast(`Análise de ${tickerToDelete} removida localmente.`, 'success', () => {
+        if (deletedData) {
+          localStorage.setItem(`analysis_${tickerToDelete}`, deletedData);
+          setSavedTickers(prev => [...prev, tickerToDelete]);
+          localStorage.setItem('saved_tickers', JSON.stringify([...newTickers, tickerToDelete]));
+          addToast(`Análise de ${tickerToDelete} restaurada.`, 'info');
+        }
+      });
     }
   };
 
-  const deleteAnalysis = (tickerToDelete: string) => {
-    const deletedData = localStorage.getItem(`analysis_${tickerToDelete}`);
-    localStorage.removeItem(`analysis_${tickerToDelete}`);
-    const newTickers = savedTickers.filter(t => t !== tickerToDelete);
-    setSavedTickers(newTickers);
-    localStorage.setItem('saved_tickers', JSON.stringify(newTickers));
-    
-    addToast(`Análise de ${tickerToDelete} removida.`, 'success', () => {
-      if (deletedData) {
-        localStorage.setItem(`analysis_${tickerToDelete}`, deletedData);
-        setSavedTickers(prev => [...prev, tickerToDelete]);
-        localStorage.setItem('saved_tickers', JSON.stringify([...newTickers, tickerToDelete]));
-        addToast(`Análise de ${tickerToDelete} restaurada.`, 'info');
+  const handleAuth = async (e: FormEvent) => {
+    e.preventDefault();
+    setAuthLoading(true);
+    try {
+      if (isSignUp) {
+        const { error } = await supabase.auth.signUp({
+          email: authEmail,
+          password: authPassword,
+        });
+        if (error) throw error;
+        addToast('Cadastro realizado! Verifique seu e-mail.', 'success');
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({
+          email: authEmail,
+          password: authPassword,
+        });
+        if (error) throw error;
+        addToast('Login realizado com sucesso!', 'success');
       }
-    });
+      setShowAuthModal(false);
+    } catch (err: any) {
+      addToast(err.message, 'error');
+    } finally {
+      setAuthLoading(false);
+    }
   };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    addToast('Sessão encerrada.', 'info');
+  };
+
+  const [step, setStep] = useState(1);
+  const [direction, setDirection] = useState(0);
+  const [activeMethodology, setActiveMethodology] = useState<string | null>(null);
+  const [baselineStock, setBaselineStock] = useState<StockData | null>(null);
+  const [showComparison, setShowComparison] = useState(false);
+  const [lastImpact, setLastImpact] = useState<{ field: string, delta: number } | null>(null);
 
   const results = useMemo(() => calculateValuation(stock), [stock]);
+  const baselineResults = useMemo(() => baselineStock ? calculateValuation(baselineStock) : null, [baselineStock]);
+
+  const setAsBaseline = () => {
+    setBaselineStock({ ...stock });
+    addToast('Cenário atual definido como base para comparação.', 'success');
+  };
 
   const handleSearch = async (e?: FormEvent) => {
     if (e) e.preventDefault();
@@ -297,41 +445,48 @@ export default function App() {
     }
   };
 
+  const impactTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const calculateAndShowImpact = (nextStock: StockData, fieldName: string) => {
+    const delta = calculateValuation(nextStock).finalFairPrice - results.finalFairPrice;
+    if (Math.abs(delta) > 0.01) {
+      setLastImpact({ field: fieldName, delta });
+      if (impactTimerRef.current) clearTimeout(impactTimerRef.current);
+      impactTimerRef.current = setTimeout(() => setLastImpact(null), 3000);
+    }
+  };
+
   const updateField = (field: keyof StockData, value: any) => {
     const previousValue = stock[field];
-    setStock(prev => {
-      const safeValue = typeof value === 'number' ? (isNaN(value) ? 0 : value) : value;
-      const next = { 
-        ...prev, 
-        [field]: safeValue,
-        indicators: { ...prev.indicators } // Ensure immutability
-      };
-      
-      // Sincronização de campos comuns
-      if (field === 'crescimentoLucro5A' || field === 'crescimentoFcf5A') {
-        next.crescimentoLucro5A = safeValue;
-        next.crescimentoFcf5A = safeValue;
-        next.indicators.profitGrowth = safeValue;
-      }
-      
-      if (field === 'taxaRetornoDesejada' || field === 'taxaDescontoWACC') {
-        next.taxaRetornoDesejada = safeValue;
-        next.taxaDescontoWACC = safeValue;
-      }
-      
-      if (field === 'crescimentoPerpetuidade' || field === 'crescimentoInfinito') {
-        next.crescimentoPerpetuidade = safeValue;
-        next.crescimentoInfinito = safeValue;
-      }
+    const safeValue = typeof value === 'number' ? (isNaN(value) ? 0 : value) : value;
+    
+    const nextStock = { 
+      ...stock, 
+      [field]: safeValue,
+      indicators: { ...stock.indicators } 
+    };
+    
+    if (field === 'crescimentoLucro5A' || field === 'crescimentoFcf5A') {
+      nextStock.crescimentoLucro5A = safeValue;
+      nextStock.crescimentoFcf5A = safeValue;
+      nextStock.indicators.profitGrowth = safeValue;
+    }
+    if (field === 'taxaRetornoDesejada' || field === 'taxaDescontoWACC') {
+      nextStock.taxaRetornoDesejada = safeValue;
+      nextStock.taxaDescontoWACC = safeValue;
+    }
+    if (field === 'crescimentoPerpetuidade' || field === 'crescimentoInfinito') {
+      nextStock.crescimentoPerpetuidade = safeValue;
+      nextStock.crescimentoInfinito = safeValue;
+    }
+    if (field === 'lpa') nextStock.indicators.lpa = nextStock.lpa;
+    if (field === 'vpa') nextStock.indicators.vpa = nextStock.vpa;
+    if (field === 'dividendYield') nextStock.indicators.dy = nextStock.dividendYield;
+    if (field === 'payout') nextStock.indicators.payout = nextStock.payout;
+    if (field === 'roe') nextStock.indicators.roe = nextStock.roe;
 
-      if (field === 'lpa') next.indicators.lpa = next.lpa;
-      if (field === 'vpa') next.indicators.vpa = next.vpa;
-      if (field === 'dividendYield') next.indicators.dy = next.dividendYield;
-      if (field === 'payout') next.indicators.payout = next.payout;
-      if (field === 'roe') next.indicators.roe = next.roe;
-      
-      return next;
-    });
+    setStock(nextStock);
+    calculateAndShowImpact(nextStock, field.toString());
 
     if (field === 'sector' && previousValue !== value) {
       addToast(`Setor alterado para ${value}.`, 'info', () => {
@@ -342,13 +497,15 @@ export default function App() {
 
   const updateManualScore = (key: string, score: number) => {
     const previousScore = stock.manualScores?.[key];
-    setStock(prev => ({
-      ...prev,
+    const nextStock = {
+      ...stock,
       manualScores: {
-        ...(prev.manualScores || {}),
+        ...(stock.manualScores || {}),
         [key]: score
       }
-    }));
+    };
+    setStock(nextStock);
+    calculateAndShowImpact(nextStock, key);
     
     if (previousScore !== undefined && previousScore !== score) {
       addToast(`Nota de ${key} alterada para ${score}.`, 'info', () => {
@@ -364,36 +521,34 @@ export default function App() {
   };
 
   const updateIndicator = (field: keyof StockData['indicators'], value: number) => {
-    setStock(prev => {
-      const safeValue = isNaN(value) ? 0 : value;
-      const next = {
-        ...prev,
-        indicators: {
-          ...prev.indicators,
-          [field]: safeValue
-        }
-      };
-
-      // Sync back to top-level fields
-      if (field === 'roe') next.roe = safeValue;
-      if (field === 'lpa') next.lpa = safeValue;
-      if (field === 'vpa') next.vpa = safeValue;
-      if (field === 'dy') next.dividendYield = safeValue;
-      if (field === 'payout') next.payout = safeValue;
-      if (field === 'profitGrowth') {
-        next.crescimentoLucro5A = safeValue;
-        next.crescimentoFcf5A = safeValue;
+    const safeValue = isNaN(value) ? 0 : value;
+    const nextStock = {
+      ...stock,
+      indicators: {
+        ...stock.indicators,
+        [field]: safeValue
       }
+    };
 
-      return next;
-    });
+    if (field === 'roe') nextStock.roe = safeValue;
+    if (field === 'lpa') nextStock.lpa = safeValue;
+    if (field === 'vpa') nextStock.vpa = safeValue;
+    if (field === 'dy') nextStock.dividendYield = safeValue;
+    if (field === 'payout') nextStock.payout = safeValue;
+    if (field === 'profitGrowth') {
+      nextStock.crescimentoLucro5A = safeValue;
+      nextStock.crescimentoFcf5A = safeValue;
+    }
+
+    setStock(nextStock);
+    calculateAndShowImpact(nextStock, field);
   };
 
   const updateWeight = (field: keyof NonNullable<StockData['weights']>, value: number) => {
-    setStock(prev => ({
-      ...prev,
+    const nextStock = {
+      ...stock,
       weights: {
-        ...(prev.weights || {
+        ...(stock.weights || {
           priceWithMargin: 0.4,
           graham: 0.2,
           bazin: 0.2,
@@ -402,12 +557,10 @@ export default function App() {
         }),
         [field]: value
       }
-    }));
+    };
+    setStock(nextStock);
+    calculateAndShowImpact(nextStock, field);
   };
-
-  const [step, setStep] = useState(1);
-  const [direction, setDirection] = useState(0);
-  const [activeMethodology, setActiveMethodology] = useState<string | null>(null);
 
   const goToStep = (newStep: number) => {
     setDirection(newStep > step ? 1 : -1);
@@ -473,18 +626,18 @@ export default function App() {
     <div className="min-h-screen bg-[#F8F9FA] text-[#1A1A1A] font-sans selection:bg-indigo-100">
       {/* Header */}
       <header className="bg-white border-b border-gray-200 sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-2 shrink-0">
             <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center">
               <Calculator className="text-white w-5 h-5" />
             </div>
-            <h1 className="text-lg font-semibold tracking-tight">Preço Justo Pro</h1>
+            <h1 className="text-lg font-semibold tracking-tight hidden sm:block">Preço Justo Pro</h1>
           </div>
           
-          <form onSubmit={handleSearch} className="relative w-full max-w-md ml-8">
+          <form onSubmit={handleSearch} className="relative flex-1 max-w-md">
             <input
               type="text"
-              placeholder="Digite o ticker (ex: CMIG4, PETR4)..."
+              placeholder="Ticker (ex: PETR4)..."
               className="w-full bg-gray-100 border-none rounded-full py-2 pl-10 pr-4 focus:ring-2 focus:ring-indigo-500 transition-all text-sm"
               value={ticker}
               onChange={(e) => setTicker(e.target.value.toUpperCase())}
@@ -499,7 +652,7 @@ export default function App() {
             </button>
           </form>
           
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1 sm:gap-3 shrink-0">
             <div className="relative">
               <button 
                 onClick={() => setShowHistory(!showHistory)}
@@ -522,8 +675,9 @@ export default function App() {
                     exit={{ opacity: 0, y: 10, scale: 0.95 }}
                     className="absolute right-0 mt-2 w-64 bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden z-[60]"
                   >
-                    <div className="p-4 border-b border-gray-50 bg-gray-50/50">
+                    <div className="p-4 border-b border-gray-50 bg-gray-50/50 flex justify-between items-center">
                       <h3 className="text-xs font-bold text-gray-400 uppercase tracking-widest">Análises Salvas</h3>
+                      {user ? <Cloud className="w-3 h-3 text-indigo-400" /> : <CloudOff className="w-3 h-3 text-gray-300" />}
                     </div>
                     <div className="max-h-80 overflow-y-auto">
                       {savedTickers.length === 0 ? (
@@ -555,14 +709,103 @@ export default function App() {
               </AnimatePresence>
             </div>
 
-            <div className="hidden sm:flex items-center gap-4 text-xs font-medium text-gray-500 uppercase tracking-wider">
-              <span>Análise Comportamental</span>
-              <div className="w-1 h-1 bg-gray-300 rounded-full" />
-              <span>Valuation Ponderado</span>
-            </div>
+            {user ? (
+              <div className="flex items-center gap-2">
+                <button 
+                  onClick={handleLogout}
+                  className="p-2 text-gray-500 hover:text-rose-600 hover:bg-rose-50 rounded-full transition-all"
+                  title="Sair"
+                >
+                  <LogOut className="w-5 h-5" />
+                </button>
+                <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center border border-indigo-200 hidden sm:flex">
+                  <UserIcon className="w-4 h-4 text-indigo-600" />
+                </div>
+              </div>
+            ) : (
+              <button 
+                onClick={() => setShowAuthModal(true)}
+                className="flex items-center gap-2 px-3 py-1.5 bg-indigo-600 text-white rounded-full text-xs font-bold hover:bg-indigo-700 transition-all shadow-sm"
+              >
+                <LogIn className="w-4 h-4" />
+                <span className="hidden sm:inline">Entrar</span>
+              </button>
+            )}
           </div>
         </div>
       </header>
+
+      {/* Auth Modal */}
+      <AnimatePresence>
+        {showAuthModal && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowAuthModal(false)}
+              className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-md bg-white rounded-3xl shadow-2xl overflow-hidden"
+            >
+              <div className="p-8">
+                <div className="flex justify-between items-center mb-6">
+                  <h2 className="text-2xl font-bold text-indigo-950">{isSignUp ? 'Criar Conta' : 'Bem-vindo'}</h2>
+                  <button onClick={() => setShowAuthModal(false)} className="p-2 hover:bg-gray-100 rounded-full">
+                    <X className="w-5 h-5 text-gray-400" />
+                  </button>
+                </div>
+                
+                <form onSubmit={handleAuth} className="space-y-4">
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1.5 ml-1">E-mail</label>
+                    <input 
+                      type="email" 
+                      required
+                      value={authEmail}
+                      onChange={(e) => setAuthEmail(e.target.value)}
+                      className="w-full px-4 py-3 bg-gray-50 border border-gray-100 rounded-2xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                      placeholder="seu@email.com"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1.5 ml-1">Senha</label>
+                    <input 
+                      type="password" 
+                      required
+                      value={authPassword}
+                      onChange={(e) => setAuthPassword(e.target.value)}
+                      className="w-full px-4 py-3 bg-gray-50 border border-gray-100 rounded-2xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                      placeholder="••••••••"
+                    />
+                  </div>
+                  
+                  <button 
+                    type="submit"
+                    disabled={authLoading}
+                    className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-bold shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition-all disabled:opacity-50"
+                  >
+                    {authLoading ? <RefreshCw className="w-5 h-5 animate-spin mx-auto" /> : (isSignUp ? 'Cadastrar' : 'Entrar')}
+                  </button>
+                </form>
+                
+                <div className="mt-6 text-center">
+                  <button 
+                    onClick={() => setIsSignUp(!isSignUp)}
+                    className="text-sm text-indigo-600 font-semibold hover:underline"
+                  >
+                    {isSignUp ? 'Já tem uma conta? Entre aqui' : 'Não tem conta? Cadastre-se'}
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {error && (
@@ -642,7 +885,7 @@ export default function App() {
 
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1.5">
-                    <label className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider flex items-center">
+                    <label className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider flex items-center min-h-[28px]">
                       Valor Patrimonial (VPA)
                       <InfoTooltip 
                         title="Valor Patrimonial" 
@@ -658,7 +901,7 @@ export default function App() {
                     />
                   </div>
                   <div className="space-y-1.5">
-                    <label className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider flex items-center">
+                    <label className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider flex items-center min-h-[28px]">
                       Dividend Yield %
                       <InfoTooltip 
                         title="Dividend Yield" 
@@ -678,7 +921,7 @@ export default function App() {
 
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1.5">
-                    <label className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider flex items-center">
+                    <label className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider flex items-center min-h-[28px]">
                       Rentabilidade (ROE) %
                       <InfoTooltip 
                         title="Rentabilidade (ROE)" 
@@ -695,7 +938,7 @@ export default function App() {
                     />
                   </div>
                   <div className="space-y-1.5">
-                    <label className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider flex items-center">
+                    <label className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider flex items-center min-h-[28px]">
                       P/L Médio do Setor
                       <InfoTooltip 
                         title="Preço/Lucro Médio" 
@@ -715,7 +958,7 @@ export default function App() {
 
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1.5">
-                    <label className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider flex items-center">
+                    <label className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider flex items-center min-h-[28px]">
                       Taxa Retorno Desejada %
                       <InfoTooltip 
                         title="Taxa de Retorno Desejada" 
@@ -732,7 +975,7 @@ export default function App() {
                     />
                   </div>
                   <div className="space-y-1.5">
-                    <label className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider flex items-center">
+                    <label className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider flex items-center min-h-[28px]">
                       Distribuição (Payout) %
                       <InfoTooltip 
                         title="Distribuição (Payout)" 
@@ -881,19 +1124,35 @@ export default function App() {
                         </h2>
                         <p className="text-[10px] text-gray-400 font-medium mt-1 uppercase tracking-wider">Cálculo baseado em múltiplas metodologias de mercado</p>
                       </div>
-                      <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-2 sm:gap-3">
+                        {baselineStock && (
+                          <button 
+                            onClick={() => setShowComparison(!showComparison)}
+                            className={`flex items-center gap-2 text-[9px] sm:text-[10px] font-bold uppercase tracking-widest transition-colors px-2 sm:px-3 py-2 rounded-lg ${
+                              showComparison ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                            }`}
+                          >
+                            <History className="w-3 h-3" /> <span className="hidden xs:inline">{showComparison ? 'Ocultar' : 'Comparar'}</span>
+                          </button>
+                        )}
                         <button 
-                          onClick={() => setShowDetails(!showDetails)}
-                          className="flex items-center gap-2 text-[10px] font-bold text-indigo-600 uppercase tracking-widest hover:text-indigo-700 transition-colors bg-indigo-50 px-3 py-2 rounded-lg"
+                          onClick={setAsBaseline}
+                          className="flex items-center gap-2 text-[9px] sm:text-[10px] font-bold text-indigo-600 uppercase tracking-widest hover:text-indigo-700 transition-colors bg-indigo-50 px-2 sm:px-3 py-2 rounded-lg"
+                          title="Define o cenário atual como base para futuras comparações"
                         >
-                          {showDetails ? 'Ocultar Detalhes' : 'Ver Detalhes'}
-                          {showDetails ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                          <Target className="w-3 h-3" /> <span className="hidden xs:inline">Base</span>
+                        </button>
+                        <button 
+                          onClick={saveAnalysis}
+                          className="flex items-center gap-2 text-[9px] sm:text-[10px] font-bold text-emerald-600 uppercase tracking-widest hover:text-emerald-700 transition-colors bg-emerald-50 px-2 sm:px-3 py-2 rounded-lg"
+                        >
+                          <Save className="w-3 h-3" /> <span className="hidden xs:inline">Salvar</span>
                         </button>
                         <button 
                           onClick={() => goToStep(2)}
-                          className="flex items-center gap-2 text-[10px] font-bold text-white bg-indigo-600 uppercase tracking-widest hover:bg-indigo-700 transition-colors px-3 py-2 rounded-lg shadow-sm"
+                          className="flex items-center gap-2 text-[9px] sm:text-[10px] font-bold text-white bg-indigo-600 uppercase tracking-widest hover:bg-indigo-700 transition-colors px-2 sm:px-3 py-2 rounded-lg shadow-sm"
                         >
-                          Valuation FCF <ArrowRight className="w-3 h-3" />
+                          <span className="hidden xs:inline">Valuation</span> FCF <ArrowRight className="w-3 h-3" />
                         </button>
                       </div>
                     </div>
@@ -942,11 +1201,42 @@ export default function App() {
                       </div>
 
                       <span className="text-[11px] font-bold uppercase tracking-[0.2em] text-gray-400">Preço Justo Estimado</span>
-                      <div className="flex items-baseline gap-1">
+                      <div className="flex items-baseline gap-1 relative">
                         <span className="text-2xl font-light text-gray-400">R$</span>
                         <span className="text-6xl font-black tracking-tighter text-indigo-950">
                           {results.finalFairPrice.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}
                         </span>
+                        
+                        <AnimatePresence>
+                          {lastImpact && (
+                            <motion.div 
+                              initial={{ opacity: 0, x: 20 }}
+                              animate={{ opacity: 1, x: 0 }}
+                              exit={{ opacity: 0, x: -10 }}
+                              className={`absolute -right-24 top-1/2 -translate-y-1/2 text-xs font-bold px-2 py-1 rounded-full flex items-center gap-1 shadow-sm ${
+                                lastImpact.delta > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'
+                              }`}
+                            >
+                              {lastImpact.delta > 0 ? '+' : ''}{lastImpact.delta.toFixed(2)}
+                              {lastImpact.delta > 0 ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+
+                        {showComparison && baselineResults && (
+                          <div className="absolute -top-8 left-1/2 -translate-x-1/2 flex flex-col items-center">
+                            <span className="text-[9px] font-black text-amber-600 uppercase tracking-widest mb-1">Cenário Base</span>
+                            <div className="flex items-center gap-2 text-sm font-bold text-gray-400 line-through decoration-amber-500/50">
+                              R$ {baselineResults.finalFairPrice.toFixed(2)}
+                            </div>
+                            <div className={`text-[10px] font-black mt-1 ${
+                              results.finalFairPrice > baselineResults.finalFairPrice ? 'text-emerald-600' : 'text-rose-600'
+                            }`}>
+                              {results.finalFairPrice > baselineResults.finalFairPrice ? '+' : ''}
+                              {((results.finalFairPrice / baselineResults.finalFairPrice - 1) * 100).toFixed(1)}% vs Base
+                            </div>
+                          </div>
+                        )}
                       </div>
                       <div className={`px-4 py-1.5 rounded-full border text-sm font-bold flex items-center gap-2 ${getMarginColor(results.marginOfSafety)}`}>
                         {results.marginOfSafety > 0 ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
@@ -1039,20 +1329,23 @@ export default function App() {
                         />
                       </div>
                       
-                      <div className="bg-gray-50 rounded-xl p-6 flex flex-col justify-center space-y-4">
-                        <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 rounded-full bg-white border border-gray-200 flex items-center justify-center shadow-sm">
-                            <Calculator className="w-5 h-5 text-indigo-600" />
-                          </div>
-                          <div>
-                            <div className="text-[10px] font-bold text-gray-400 uppercase">Média Técnica</div>
-                            <div className="text-xl font-black text-indigo-950">R$ {results.weightedAverage.toFixed(2)}</div>
-                          </div>
-                        </div>
-                        <p className="text-[11px] text-gray-500 leading-relaxed italic">
-                          "A média ponderada reduz o ruído de metodologias individuais, criando um preço base mais robusto antes do ajuste de risco qualitativo."
-                        </p>
-                      </div>
+      <div className="bg-gray-50 rounded-xl p-6 flex flex-col justify-center space-y-4 border-2 border-indigo-100 shadow-inner relative overflow-hidden">
+        <div className="absolute top-0 right-0 p-2">
+          <div className="bg-indigo-600 text-white text-[8px] font-black px-2 py-0.5 rounded-full uppercase tracking-widest">Média Principal</div>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="w-12 h-12 rounded-full bg-white border-2 border-indigo-600 flex items-center justify-center shadow-md">
+            <Calculator className="w-6 h-6 text-indigo-600" />
+          </div>
+          <div>
+            <div className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Média Técnica Ponderada</div>
+            <div className="text-2xl font-black text-indigo-950">R$ {results.weightedAverage.toFixed(2)}</div>
+          </div>
+        </div>
+        <p className="text-[11px] text-gray-500 leading-relaxed italic">
+          "A média ponderada é o coração do cálculo, combinando 5 metodologias para reduzir o viés de um único modelo."
+        </p>
+      </div>
                     </div>
                   </section>
 
@@ -1076,68 +1369,78 @@ export default function App() {
                           exit={{ height: 0, opacity: 0 }}
                           className="overflow-visible"
                         >
-                          <div className="p-6 pt-0 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                            <MethodCard 
-                              title="Fluxo de Caixa (DCF)" 
-                              value={results.priceWithMargin} 
-                              weight={`${Math.round((stock.weights?.priceWithMargin ?? 0.4) * 100)}%`} 
-                              desc={`V. Intrínseco: R$ ${results.intrinsicValue.toFixed(2)}. Aplicada margem de 25%.`}
-                              isHighlighted={activeMethodology === 'dcf'}
-                              tooltip={{
-                                title: "Fluxo de Caixa Descontado (DCF)",
-                                content: "Projeta o dinheiro que a empresa vai gerar no futuro e traz esse valor para o presente, descontando uma taxa de risco. É considerado o método mais completo de valuation.",
-                                example: "Se você espera receber R$ 100 daqui a um ano, hoje esse valor vale menos (ex: R$ 90) devido ao risco e ao tempo."
-                              }}
-                            />
-                            <MethodCard 
-                              title="Fórmula de Graham" 
-                              value={results.graham} 
-                              weight={`${Math.round((stock.weights?.graham ?? 0.2) * 100)}%`} 
-                              desc="Valuation clássico baseado em LPA e VPA."
-                              isHighlighted={activeMethodology === 'graham'}
-                              tooltip={{
-                                title: "Fórmula de Graham",
-                                content: "Criada pelo mentor de Warren Buffett, busca o 'valor intrínseco' usando o lucro (LPA) e o patrimônio (VPA). Assume que o mercado paga um múltiplo justo por esses fundamentos.",
-                                example: "Preço Justo = √(22,5 * LPA * VPA). O 22,5 é um multiplicador padrão de Graham."
-                              }}
-                            />
-                            <MethodCard 
-                              title="Método de Bazin" 
-                              value={results.bazin} 
-                              weight={`${Math.round((stock.weights?.bazin ?? 0.2) * 100)}%`} 
-                              desc="Foco em dividendos constantes (Yield de 6%)."
-                              isHighlighted={activeMethodology === 'bazin'}
-                              tooltip={{
-                                title: "Método de Décio Bazin",
-                                content: "Foca na renda passiva. Calcula o preço máximo a pagar para garantir um rendimento de dividendos de pelo menos 6% ao ano.",
-                                example: "Se uma empresa paga R$ 0,60 de dividendo, o preço teto para ter 6% de yield é R$ 10,00."
-                              }}
-                            />
-                            <MethodCard 
-                              title="Patrimonial (VPA)" 
-                              value={results.vpaMethod} 
-                              weight={`${Math.round((stock.weights?.vpaMethod ?? 0.1) * 100)}%`} 
-                              desc="Valor contábil ajustado pelo crescimento."
-                              isHighlighted={activeMethodology === 'vpa'}
-                              tooltip={{
-                                title: "Valor Patrimonial Ajustado",
-                                content: "Usa o valor dos bens da empresa (VPA) e adiciona uma expectativa de crescimento para os próximos anos.",
-                                example: "Se a empresa tem R$ 10 em bens por ação e cresce 5%, o valor patrimonial futuro é considerado no preço."
-                              }}
-                            />
-                            <MethodCard 
-                              title="Múltiplos (P/L)" 
-                              value={results.valuationMultiples} 
-                              weight={`${Math.round((stock.weights?.valuationMultiples ?? 0.1) * 100)}%`} 
-                              desc="Comparação direta com lucros históricos."
-                              isHighlighted={activeMethodology === 'multiples'}
-                              tooltip={{
-                                title: "Valuation por Múltiplos",
-                                content: "Estima o valor da ação multiplicando o lucro atual (LPA) pelo P/L médio histórico ou do setor.",
-                                example: "Se o LPA é R$ 2,00 e o P/L justo é 10, o preço estimado é R$ 20,00."
-                              }}
-                            />
-                            <div className="p-6 bg-indigo-50/50 rounded-2xl border border-dashed border-indigo-200 flex flex-col justify-center items-center text-center">
+                          <div className="p-6 pt-0 flex overflow-x-auto sm:grid sm:grid-cols-2 lg:grid-cols-3 gap-4 scrollbar-hide snap-x snap-mandatory">
+                            <div className="min-w-[280px] sm:min-w-0 snap-start">
+                              <MethodCard 
+                                title="Fluxo de Caixa (DCF)" 
+                                value={results.priceWithMargin} 
+                                weight={`${Math.round((stock.weights?.priceWithMargin ?? 0.4) * 100)}%`} 
+                                desc={`V. Intrínseco: R$ ${results.intrinsicValue.toFixed(2)}. Aplicada margem de 25%.`}
+                                isHighlighted={activeMethodology === 'dcf'}
+                                tooltip={{
+                                  title: "Fluxo de Caixa Descontado (DCF)",
+                                  content: "Projeta o dinheiro que a empresa vai gerar no futuro e traz esse valor para o presente, descontando uma taxa de risco. É considerado o método mais completo de valuation.",
+                                  example: "Se você espera receber R$ 100 daqui a um ano, hoje esse valor vale menos (ex: R$ 90) devido ao risco e ao tempo."
+                                }}
+                              />
+                            </div>
+                            <div className="min-w-[280px] sm:min-w-0 snap-start">
+                              <MethodCard 
+                                title="Fórmula de Graham" 
+                                value={results.graham} 
+                                weight={`${Math.round((stock.weights?.graham ?? 0.2) * 100)}%`} 
+                                desc="Valuation clássico baseado em LPA e VPA."
+                                isHighlighted={activeMethodology === 'graham'}
+                                tooltip={{
+                                  title: "Fórmula de Graham",
+                                  content: "Criada pelo mentor de Warren Buffett, busca o 'valor intrínseco' usando o lucro (LPA) e o patrimônio (VPA). Assume que o mercado paga um múltiplo justo por esses fundamentos.",
+                                  example: "Preço Justo = √(22,5 * LPA * VPA). O 22,5 é um multiplicador padrão de Graham."
+                                }}
+                              />
+                            </div>
+                            <div className="min-w-[280px] sm:min-w-0 snap-start">
+                              <MethodCard 
+                                title="Método de Bazin" 
+                                value={results.bazin} 
+                                weight={`${Math.round((stock.weights?.bazin ?? 0.2) * 100)}%`} 
+                                desc="Foco em dividendos constantes (Yield de 6%)."
+                                isHighlighted={activeMethodology === 'bazin'}
+                                tooltip={{
+                                  title: "Método de Décio Bazin",
+                                  content: "Foca na renda passiva. Calcula o preço máximo a pagar para garantir um rendimento de dividendos de pelo menos 6% ao ano.",
+                                  example: "Se uma empresa paga R$ 0,60 de dividendo, o preço teto para ter 6% de yield é R$ 10,00."
+                                }}
+                              />
+                            </div>
+                            <div className="min-w-[280px] sm:min-w-0 snap-start">
+                              <MethodCard 
+                                title="Patrimonial (VPA)" 
+                                value={results.vpaMethod} 
+                                weight={`${Math.round((stock.weights?.vpaMethod ?? 0.1) * 100)}%`} 
+                                desc="Valor contábil ajustado pelo crescimento."
+                                isHighlighted={activeMethodology === 'vpa'}
+                                tooltip={{
+                                  title: "Valor Patrimonial Ajustado",
+                                  content: "Usa o valor dos bens da empresa (VPA) e adiciona uma expectativa de crescimento para os próximos anos.",
+                                  example: "Se a empresa tem R$ 10 em bens por ação e cresce 5%, o valor patrimonial futuro é considerado no preço."
+                                }}
+                              />
+                            </div>
+                            <div className="min-w-[280px] sm:min-w-0 snap-start">
+                              <MethodCard 
+                                title="Múltiplos (P/L)" 
+                                value={results.valuationMultiples} 
+                                weight={`${Math.round((stock.weights?.valuationMultiples ?? 0.1) * 100)}%`} 
+                                desc="Comparação direta com lucros históricos."
+                                isHighlighted={activeMethodology === 'multiples'}
+                                tooltip={{
+                                  title: "Valuation por Múltiplos",
+                                  content: "Estima o valor da ação multiplicando o lucro atual (LPA) pelo P/L médio histórico ou do setor.",
+                                  example: "Se o LPA é R$ 2,00 e o P/L justo é 10, o preço estimado é R$ 20,00."
+                                }}
+                              />
+                            </div>
+                            <div className="min-w-[280px] sm:min-w-0 snap-start p-6 bg-indigo-50/50 rounded-2xl border border-dashed border-indigo-200 flex flex-col justify-center items-center text-center">
                               <span className="text-[10px] font-black text-indigo-400 uppercase tracking-widest mb-1">Média Ponderada</span>
                               <span className="text-2xl font-black text-indigo-600">R$ {results.weightedAverage.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}</span>
                             </div>
@@ -1453,9 +1756,9 @@ export default function App() {
                       {results.indicatorScore.categories.map((category, idx) => (
                         <div key={idx} className="space-y-4">
                           <h3 className="text-[11px] font-black text-gray-400 uppercase tracking-widest border-l-4 border-indigo-600 pl-3">{category.title}</h3>
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-stretch">
+                          <div className="flex overflow-x-auto md:grid md:grid-cols-2 gap-4 items-stretch scrollbar-hide snap-x snap-mandatory pb-2">
                             {category.indicators.map((ind, iIdx) => (
-                              <div key={iIdx} className="group relative bg-gray-50 hover:bg-white hover:shadow-md border border-gray-100 rounded-xl p-4 transition-all flex flex-col justify-between h-full">
+                              <div key={iIdx} className="min-w-[280px] md:min-w-0 snap-start group relative bg-gray-50 hover:bg-white hover:shadow-md border border-gray-100 rounded-xl p-4 transition-all flex flex-col justify-between h-full">
                                 <div className="flex justify-between items-start mb-4">
                                   <div className="flex items-center gap-2">
                                     <span className="text-xs font-bold text-indigo-950 uppercase tracking-tight">{ind.name}</span>
@@ -1723,7 +2026,7 @@ function MethodCard({ title, value, weight, desc, tooltip, isHighlighted }: { ti
         borderColor: isHighlighted ? 'rgb(79, 70, 229)' : 'rgb(243, 244, 246)',
         boxShadow: isHighlighted ? '0 10px 25px -5px rgba(79, 70, 229, 0.1), 0 8px 10px -6px rgba(79, 70, 229, 0.1)' : 'none'
       }}
-      className={`p-5 bg-gray-50 hover:bg-white hover:shadow-md transition-all rounded-2xl border space-y-3 relative overflow-hidden flex flex-col justify-between min-h-[140px] ${isHighlighted ? 'bg-white z-10' : ''}`}
+      className={`p-5 bg-gray-50 hover:bg-white hover:shadow-md transition-all rounded-2xl border space-y-3 relative flex flex-col justify-between min-h-[140px] ${isHighlighted ? 'bg-white z-10' : ''}`}
     >
       {isHighlighted && (
         <motion.div 
