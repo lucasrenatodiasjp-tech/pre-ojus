@@ -631,7 +631,7 @@ export default function App() {
             <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center">
               <Calculator className="text-white w-5 h-5" />
             </div>
-            <h1 className="text-lg font-semibold tracking-tight hidden sm:block">Preço Justo Pro</h1>
+            <h1 className="text-lg font-semibold tracking-tight hidden sm:block">ponderai</h1>
           </div>
           
           <form onSubmit={handleSearch} className="relative flex-1 max-w-md">
@@ -1961,10 +1961,9 @@ export default function App() {
 
       <footer className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12 border-t border-gray-200 mt-12">
         <div className="flex flex-col md:flex-row justify-between items-center gap-6 text-gray-400 text-xs">
-          <p>© 2026 Preço Justo Pro. Ferramenta educacional baseada em arquitetura de escolha.</p>
+          <p>© 2026 ponderai. Ferramenta educacional para análise de ativos.</p>
           <div className="flex gap-8">
             <a href="#" className="hover:text-indigo-600 transition-colors">Metodologia</a>
-            <a href="#" className="hover:text-indigo-600 transition-colors">Vieses Cognitivos</a>
             <a href="#" className="hover:text-indigo-600 transition-colors">Privacidade</a>
           </div>
         </div>

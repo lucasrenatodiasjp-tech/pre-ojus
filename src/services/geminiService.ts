@@ -36,15 +36,54 @@ export const extractStockData = async (ticker: string): Promise<Partial<StockDat
     return cache[tickerUpper].data;
   }
 
+  const apiKey = process.env.GEMINI_API_KEY || (import.meta as any).env?.VITE_GEMINI_API_KEY || "AIzaSyCUssz0tHGA2LsUXIOLvR1ql-yifNl3ILg";
+  if (!apiKey || apiKey === "AIzaSyCUssz0tHGA2LsUXIOLvR1ql-yifNl3ILg") {
+    console.info("Using provided fallback Gemini API key.");
+  }
+
   try {
+    const ai = new GoogleGenAI({ apiKey });
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview", // Using the latest, fastest model
-      contents: `Extract stock indicators for ${tickerUpper} from https://analitica.auvp.com.br/acoes/${tickerUpper.toLowerCase()}. 
-      Required: currentPrice, lpa, vpa, dividendYield, revenueGrowth, profitGrowth, payout, roe, roic, roa, assetTurnover, pl, pvp, evEbitda, evEbit, earningYield, netMargin, ebitMargin, grossMargin, dlEbitda, currentRatio, quickRatio, equityToAssets, fcfAtual, dividaLiquida, acoesCirculacao, sector, plSetor.`,
+      model: "gemini-3-flash-latest", // Using latest stable flash for better tool reliability
+      contents: `Extract current financial indicators for the Brazilian stock ${tickerUpper}. 
+      Use Google Search to find data from reliable sources like StatusInvest, Fundamentus, or Analitica AUVP.
+      
+      Required fields (return as numbers, percentages as decimals):
+      - currentPrice: Current stock price in BRL
+      - lpa: Earnings per share (Lucro por Ação)
+      - vpa: Book value per share (Valor Patrimonial por Ação)
+      - dividendYield: DY % (e.g. 0.085 for 8.5%)
+      - revenueGrowth: 5-year revenue growth %
+      - profitGrowth: 5-year profit growth %
+      - payout: Dividend payout ratio %
+      - roe: Return on Equity %
+      - roic: ROIC %
+      - roa: ROA %
+      - assetTurnover: Asset turnover ratio
+      - pl: P/E ratio (Preço/Lucro)
+      - pvp: P/B ratio (Preço/Valor Patrimonial)
+      - evEbitda: EV/EBITDA
+      - evEbit: EV/EBIT
+      - earningYield: Earning Yield %
+      - netMargin: Net margin %
+      - ebitMargin: EBIT margin %
+      - grossMargin: Gross margin %
+      - dlEbitda: Net Debt / EBITDA
+      - currentRatio: Liquidez Corrente
+      - quickRatio: Liquidez Seca
+      - equityToAssets: Equity / Total Assets
+      - fcfAtual: Current Free Cash Flow (total value in BRL)
+      - dividaLiquida: Net Debt (total value in BRL)
+      - acoesCirculacao: Total shares outstanding
+      - sector: One of "finance", "cyclical", "growth", "stable"
+      - plSetor: Average P/E for the sector
+      
+      Return ONLY a valid JSON object.`,
       config: {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
-        systemInstruction: "JSON only. Source: Analitica AUVP. No search. Percentages as decimals (e.g. 0.05 for 5%).",
-        tools: [{ urlContext: {} }],
+        systemInstruction: "You are a specialized financial data extractor for the Brazilian stock market. Use Google Search to get the most accurate and recent data. If one source is blocked or unavailable, try others. Always return percentages as decimals (e.g., 15% -> 0.15). Return ONLY JSON.",
+        tools: [
+          { googleSearch: {} }
+        ],
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
