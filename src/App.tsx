@@ -25,7 +25,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { StockData, ValuationResults, calculateValuation } from './types.ts';
-import { extractStockData } from './services/geminiService.ts';
+import { getStockData } from './services/stockService.ts';
 import { formatCompactNumber, parseCompactNumber, getScaleAndValue } from './utils.ts';
 import { supabase } from './lib/supabase.ts';
 import { User } from '@supabase/supabase-js';
@@ -420,10 +420,10 @@ export default function App() {
     setSearchingSource("Iniciando busca...");
     setError(null);
     try {
-      // Check if it's in cache (extractStockData handles this, but we can show a faster message)
+      // Check if it's in cache (stockService handles this)
       setSearchingSource("Consultando base de dados...");
       
-      const extracted = await extractStockData(ticker);
+      const extracted = await getStockData(ticker);
       
       if (extracted.currentPrice) {
         setSearchingSource("Sincronizando indicadores...");
@@ -434,13 +434,23 @@ export default function App() {
         }));
         addToast(`Dados de ${ticker.toUpperCase()} atualizados!`, 'success');
       } else {
-        const errorMsg = (extracted as any).error || "Não foi possível encontrar dados para este ticker. Verifique se o ticker está correto.";
+        let errorMsg = (extracted as any).error || "Não foi possível encontrar dados para este ticker.";
+        
+        if (errorMsg.includes('429') || errorMsg.toLowerCase().includes('quota')) {
+          errorMsg = "Limite de uso da API atingido (Quota Exceeded). Aguarde 1 minuto ou preencha os dados manualmente.";
+        }
+        
         setError(errorMsg);
         addToast(errorMsg, 'error');
       }
     } catch (err: any) {
       console.error(err);
-      const msg = err.message || "Erro ao conectar com as fontes de dados.";
+      let msg = err.message || "Erro ao conectar com as fontes de dados.";
+      
+      if (msg.includes('429') || msg.toLowerCase().includes('quota')) {
+        msg = "Limite de uso da API atingido. Aguarde 1 minuto ou preencha os dados manualmente.";
+      }
+      
       setError(msg);
       addToast(msg, 'error');
     } finally {
